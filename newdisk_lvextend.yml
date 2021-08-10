@@ -1,0 +1,103 @@
+# Playbook to extend file systems with new disk on VMware Linux virtual machine.
+# Example : ansible-playbook -i inventory main.yml --extra-vars '{"":"","":"","mountpoint":"","new_size":""}' --tags new_disk
+- name: Capture the number of ISCSI storage interconnects.
+  shell: find /sys/class/scsi_host/host* -maxdepth 4 -type d -o -type l 2> /dev/null | awk -F'/' '{print $5}'
+  register: iscsi_hosts
+
+- name: Display Device.
+  debug:
+    var: iscsi_hosts
+
+- name: Rescan ISCSI for new disks.
+  command: echo "- - -" > /sys/class/scsi_host/{{ iscsi_hosts.stdout_lines | last }}/scan
+  register: scanresult
+
+- name: Validate Rescan ISCSI for new disks.
+  fail:
+    msg: Failed Rescaning ISCSI. Please check if the new disk is addedd.
+  when: scanresult.rc != 0 or "No such file or directory" in scanresult.stdout
+
+- name: Capture current physical volumes configured.
+  shell: pvs | grep -v Attr | awk '{print $1}' | cut -d'/' -f 3 | grep -Po "[a-z]+"
+  register: pv_list
+
+- name: Capture all devices with find command.
+  shell: find /dev/sd[a-z] | awk -F '/' '{print $3}'
+  register: device_list
+
+- name: Display all the current devices list
+  debug:
+    var: pv_list, device_list
+
+- name: Capture the device for "{{ mountpoint }}" to extend filesystem.
+  set_fact:
+    device_used: "{{ ansible_mounts|json_query(query) | first }}"
+  vars:
+    query: "[?mount=='{{ mountpoint }}'].device"
+
+- name: Extract the volume group for "{{ device_used }}".
+  set_fact:
+    vg_name: "{{ device_used | regex_search(regexp, '\\1') | first }}"
+    lv_name: "{{ device_used | regex_search(regexp, '\\2') | first }}"
+  vars:
+    regexp: '\/dev\/mapper\/(\w+)-(\w+)'
+
+- name: Find and capture the new device.
+  set_fact:
+    new_device: "{{ device_list.stdout_lines | difference(pv_list.stdout_lines) }}"
+  ignore_errors: yes
+
+- name: Fail when new disk is not found.
+  fail:
+    msg: "New disk is not added. Please try after adding a new disk"
+  when: new_device is not defined or new_device|length > 1
+
+- name: Display new_device.
+  debug:
+    msg:
+      - vg_name is {{ vg_name }} and {{ vg_name | type_debug }}
+      - lv_name is {{ lv_name }} and "{{ lv_name | type_debug }}"
+      - device_used is {{ device_used }} and "{{ device_used | type_debug }}"
+      - pv_list is {{ pv_list.stdout_lines }} and "{{ pv_list | type_debug }}"
+      - device_list is {{ device_list.stdout_lines }} and "{{ device_list | type_debug }}"
+      - new_device is {{ new_device }} and "{{ new_device | type_debug }}"
+  when: new_device is defined and new_device|length == 1
+
+- name: Get 'LSize' for Logical Volume "{{ lv_name }}".
+  set_fact:
+    lv_size_g: "{{ ansible_lvm['lvs'][lv_name]['size_g'] }}"
+
+- name: find all physical volumes in volume group
+  shell: pvs | grep {{ vg_name }} | awk '{print $1}'
+  register: pvsresult
+
+- name: Checking list of physical volumes in volume group.
+  fail:
+    msg: Failed grouping all physical volumes in volume group.
+  when: pvsresult is not defined and pvsresult.rc != 0
+
+- name: Display new_device.
+  debug:
+    msg:
+      - lv_size_g is {{ lv_size_g }} and {{ vg_name | type_debug }}
+      - pvsresult is {{ pvsresult.stdout_lines | join(',') }} and "{{ pvsresult | type_debug }}"
+
+- name: Group all the physical volumes in volume group {{ vg_name }}.
+  set_fact:
+    pv_vg_list: "{{ pvsresult.stdout_lines | join(',') }}"
+
+- name: Checking list of physical volumes in volume group.
+  fail:
+    msg: Failed grouping all physical volumes in volume group.
+  when: pv_vg_list is not defined and pv_vg_list.rc != 0
+
+- name: Create or resize a volume group on top of "{{ pv_vg_list }}" and "{{ new_device }}".
+  lvg:
+    vg: "{{ vg_name }}"
+    pvs: "{{ pv_vg_list }},/dev/{{ new_device[0] }}"
+    force: no
+  register: vgextend_result
+
+- name: Include Lv Extend Playbook to resize the logical volume.
+  include_tasks: existing_lvextend.yml
+  when: vgextend_result.changed

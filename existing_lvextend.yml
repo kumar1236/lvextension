@@ -1,0 +1,110 @@
+# Playbook to extend file systems with existing disk on VMware Linux virtual machine.
+# Example : ansible-playbook -i <inv> --extra-vars '{"volumegroup_name":"","logicalvolume_name":"","std_size":"","mountpoint":"","new_size":""}' --tags existing_disk
+# Example : ansible-playbook -i <inv> main.yml --extra-vars '{"volumegroup_name":"","logicalvolume_name":"","std_size":"","mountpoint":"","new_size":""}'' --tags existing_disk
+
+  - block:
+      - name: Check if user is trying to extend '/boot' filesystem.
+        fail:
+          msg: "'/boot' partitions are not allowed to extend."
+        when: mountpoint == '/boot'
+
+      - name: Capture the device for "{{ mountpoint }}" to extend filesystem.
+        set_fact:
+          device_used: "{{ ansible_mounts|json_query(query) }}"
+        vars:
+          query: "[?mount=='{{ mountpoint }}'].device"
+
+      - name: Display Device.
+        debug:
+          msg:
+            - "{{ device_used }}"
+
+      - name: Check if given filesystem is existing and Logical Voulme.
+        fail:
+          msg: Given file system is not existing or not a Logical Volume.
+        when: ('/dev/mapper/' not in device_used[0]) or
+              (device_used is not defined) or 
+              (device_used | length == 0)
+
+      - name: Check if the given new_size_G is within the standards of filesystem.
+        debug:
+          msg: "WARNING: Standard size for {{ mountpoint }} is {{ std_size_G }}G. Given new size is not within the standards of filesystem."
+        when: (new_size_G | int) > (std_size_G | int)
+
+      - name: Get 'VFree' for Volume Group "{{ volumegroup_name }}".
+        set_fact:
+          vg_vfree_G: "{{ (ansible_lvm['vgs'][volumegroup_name]['free_g'] | float * 1024 / 1000) | int }}"
+
+      - name: Check if the given new_size_G is available in the Volume Group
+        fail:
+          msg: "Given new size is not available on the volume group."
+        when: (new_size_G | int) > (vg_vfree_G | int)
+      
+      - name: Capture the existing disk space for partition before change
+        shell: "df -hP | grep {{ mountpoint }} | awk '{print $2}'"
+        register: current_size
+
+      - name: Extend the logical volume and resize the underlying filesystem.
+        lvol:
+          vg: "{{ volumegroup_name }}"
+          lv: "{{ logicalvolume_name }}"
+          size: "{{ new_size_G }}G"
+          resizefs: true
+          shrink: no
+        register: lvextend_result
+
+      - name: Display Device.
+        debug:
+          msg:
+            - VFree is {{ vg_vfree_G }} and "{{ vg_vfree_G | type_debug }}"
+            - Current Size is {{ current_size.stdout | human_to_bytes }}"
+            - "{{ lvextend_result }}"
+
+      - name: Capture the existing disk space for partition.
+        shell: "df -hP | grep {{ mountpoint }} | awk '{print $2}'"
+        register: extended_size
+
+      - name: Check if LV Extension is Sucessfull.
+        debug:
+          msg: "Success: {{ mountpoint }} is Sucessfully Extended to {{ extended_size.stdout }} from {{ current_size.stdout }}"
+        when: lvextend_result is changed
+
+      - name: Check if LV Extension is not Sucessfull.
+        debug:
+          msg: "Failed: {{ mountpoint }} is not Sucessfully Extended. Please check the New Size given."
+        when: lvextend_result is not changed or lvextend_result is failed
+
+    rescue:
+      - name: Playbook to extend filesystem failed.
+        debug:
+          msg: "Failed: Playbook for Filesystem extension caught an error."
+  
+    # always:
+    #   - name: Capture the existing disk space for partition.
+    #     shell: "df -hP | grep {{ mountpoint }} | awk '{print $2}'"
+    #     register: extended_size
+
+    #   - name: Check if LV Extension is Sucessfull.
+    #     debug:
+    #       msg: "Success: {{ mountpoint }} is Sucessfully Extended to {{ extended_size.stdout }} from {{ current_size.stdout }}"
+    #     when: lvextend_result is changed
+
+    #   - name: Check if LV Extension is not Sucessfull.
+    #     debug:
+    #       msg: "Failed: {{ mountpoint }} is not Sucessfully Extended. Please check the New Size given."
+    #     when: lvextend_result is not changed or lvextend_result is failed or lvextend_result is undefined
+
+
+
+
+
+
+  
+
+
+
+
+
+
+
+

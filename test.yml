@@ -1,0 +1,98 @@
+
+---
+- hosts: all
+  become: True
+  gather_facts: yes
+  any_errors_fatal: true
+  tasks:
+    - block:
+        # - name: Check if user is trying to extend '/boot' filesystem.
+        #   fail:
+        #     msg: "'/boot' partitions are not allowed to extend."
+        #   when: mountpoint == '/boot'
+
+        - name: Capture the device for "{{ mountpoint }}" to extend filesystem.
+          set_fact:
+            device_used: "{{ ansible_mounts|json_query(query) }}"
+          vars:
+            query: "[?mount=='{{ mountpoint }}'].device"
+
+        - name: Display Device.
+          debug:
+            msg:
+              - Device is "{{ device_used }}"
+
+        - name: Check if given filesystem is existing and Logical Voulme.
+          fail:
+            msg: Given file system is not existing or not a Logical Volume.
+          when: ('"/dev/mapper/" not in device_used') or
+                (device_used is not defined) or 
+                (device_used | length == 0)
+
+        - name: Check if the given new_size_G is within the standards of filesystem.
+          debug:
+            msg: "WARNING: Standard size for {{ mountpoint }} is {{ std_size_G }}G. Given new size is not within the standards of filesystem."
+          when: (new_size_G | int) > (std_size_G | int)
+
+        - name: Get 'VFree' for Volume Group "{{ volumegroup_name }}".
+          set_fact:
+            vg_vfree_G: "{{ (ansible_lvm['vgs'][volumegroup_name]['free_g'] | float * 1024 / 1000) | int }}"
+
+        - name: Check if the given new_size_G is available in the Volume Group
+          fail:
+            msg: "Given new size is not available on the volume group."
+          when: (new_size_G | int) > (vg_vfree_G | int)
+        
+        - name: Capture the existing disk space for partition before change
+          shell: "df -hP | grep {{ mountpoint }} | awk '{print $2}'"
+          register: current_size
+
+        - name: Extend the logical volume and resize the underlying filesystem.
+          lvol:
+            vg: "{{ volumegroup_name }}"
+            lv: "{{ logicalvolume_name }}"
+            size: "{{ new_size_G }}G"
+            resizefs: true
+            shrink: no
+          register: lvextend_result
+
+        - name: Display Device.
+          debug:
+            msg:
+              - VFree is {{ vg_vfree_G }} and "{{ vg_vfree_G | type_debug }}"
+              - Current Size is {{ current_size.stdout | human_to_bytes }}"
+              - Device is "{{ device_used.stdout }}"
+              - "{{ lvextend_result }}"
+
+      rescue:
+        - name: Playbook to extend filesystem failed.
+          debug:
+            msg: "Failed: Playbook for Filesystem extension caught an error."
+    
+      always:
+        - name: Capture the existing disk space for partition.
+          shell: "df -hP | grep {{ mountpoint }} | awk '{print $2}'"
+          register: extended_size
+
+        - name: Check if the disk size is Sucessfully changed.
+          debug:
+            msg: "Success: {{ mountpoint }} is Sucessfully Extended."
+            when: lvextend_result is changed
+
+        - name: Display the device total size for "{{ mountpoint }}" after extend.
+          debug:
+            msg: Filesystem is sucessfully extended to "{{ extended_size.stdout }}" from "{{ current_size.stdout }}"
+          when: lvextend_result is changed
+
+
+
+
+      
+
+
+
+
+
+
+
+
